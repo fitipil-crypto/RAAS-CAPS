@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}Backup — RAAS-CAPS{% endblock %}
+{% block page_title %}Backup{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>💾 Backup</h1>
+    <p>Backup e restauração de dados</p>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card stat-primary"><div class="stat-icon">👥</div><div class="stat-value">{{ stats.pacientes }}</div><div class="stat-label">Pacientes</div></div>
+    <div class="stat-card stat-secondary"><div class="stat-icon">👨‍⚕️</div><div class="stat-value">{{ stats.profissionais }}</div><div class="stat-label">Profissionais</div></div>
+    <div class="stat-card stat-accent"><div class="stat-icon">📋</div><div class="stat-value">{{ stats.procedimentos }}</div><div class="stat-label">Procedimentos</div></div>
+    <div class="stat-card stat-warning"><div class="stat-icon">📝</div><div class="stat-value">{{ stats.registros }}</div><div class="stat-label">Registros RAAS</div></div>
+</div>
+
+<div class="card">
+    <div class="card-body" style="padding:28px;">
+        <h2>Gerar Backup</h2>
+        <p style="color:var(--muted);">Exporta todos os dados em um arquivo <code>.json</code>.</p>
+        <div style="background:var(--secondary-light);border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#065f46;">
+            ✓ Inclui: {{ stats.pacientes }} pacientes · {{ stats.profissionais }} profissionais · {{ stats.procedimentos }} procedimentos · {{ stats.registros }} registros RAAS · configurações
+        </div>
+        <button class="btn btn-secondary btn-lg" id="btnBackup" onclick="downloadBackup()">⬇️ Baixar Backup Agora</button>
+        <div class="progress-wrap" id="downloadProgress" hidden>
+            <div class="progress-info">
+                <span id="downloadLabel">Gerando backup…</span>
+                <strong id="downloadPct">0%</strong>
+            </div>
+            <div class="progress-track" id="downloadTrack"><div class="progress-fill" id="downloadFill"></div></div>
+        </div>
+    </div>
+</div>
+
+{% if user.role == 'admin' %}
+<div class="card">
+    <div class="card-body" style="padding:28px;">
+        <h2>Restaurar Backup</h2>
+        <p style="color:var(--muted);">Carregue um arquivo <code>.json</code> para restaurar os dados.</p>
+        <div style="background:var(--warning-light);border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#92400e;">
+            ⚠️ Atenção: a restauração substitui todos os dados atuais.
+        </div>
+        <input type="file" id="restoreInput" accept=".json" style="display:none;" onchange="handleRestore(event)">
+        <button class="btn btn-outline btn-lg" id="btnRestore" onclick="document.getElementById('restoreInput').click()">📁 Selecionar Arquivo de Backup</button>
+        <div class="progress-wrap" id="uploadProgress" hidden>
+            <div class="progress-info">
+                <span id="uploadLabel">Enviando arquivo…</span>
+                <strong id="uploadPct">0%</strong>
+            </div>
+            <div class="progress-track" id="uploadTrack"><div class="progress-fill" id="uploadFill"></div></div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function formatBytes(bytes) {
+    if (!bytes) return '0 KB';
+    const mb = bytes / (1024 * 1024);
+    return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/* pct = null deixa a barra em modo indeterminado (etapa sem tamanho conhecido,
+   como o servidor montando o JSON ou gravando os dados restaurados). */
+function setProgress(prefixo, pct, label, estado = '') {
+    const wrap = document.getElementById(`${prefixo}Progress`);
+    const track = document.getElementById(`${prefixo}Track`);
+    const fill = document.getElementById(`${prefixo}Fill`);
+    wrap.hidden = false;
+    wrap.className = `progress-wrap${estado ? ' progress-' + estado : ''}`;
+    document.getElementById(`${prefixo}Label`).textContent = label;
+
+    if (pct === null) {
+        track.classList.add('indeterminate');
+        fill.style.width = '';
+        document.getElementById(`${prefixo}Pct`).textContent = '…';
+        return;
+    }
+    track.classList.remove('indeterminate');
+    const valor = Math.max(0, Math.min(100, Math.round(pct)));
+    fill.style.width = `${valor}%`;
+    document.getElementById(`${prefixo}Pct`).textContent = `${valor}%`;
+}
+
+function nomeDoBackup(xhr) {
+    const cd = xhr.getResponseHeader('Content-Disposition') || '';
+    const m = cd.match(/filename=([^;]+)/i);
+    return m ? m[1].trim().replace(/["']/g, '') : 'backup_raas_caps.json';
+}
+
+function salvarArquivo(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadBackup() {
+    const btn = document.getElementById('btnBackup');
+    btn.disabled = true;
+    setProgress('download', null, 'Gerando backup no servidor…');
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/backup/download');
+    xhr.responseType = 'blob';
+
+    xhr.onprogress = (e) => {
+        if (e.lengthComputable) {
+            setProgress('download', (e.loaded / e.total) * 100,
+                `Baixando backup… ${formatBytes(e.loaded)} de ${formatBytes(e.total)}`);
+        } else {
+            setProgress('download', null, `Baixando backup… ${formatBytes(e.loaded)}`);
+        }
+    };
+
+    xhr.onload = () => {
+        btn.disabled = false;
+        if (xhr.status !== 200) {
+            setProgress('download', 100, 'Falha ao gerar o backup', 'error');
+            showToast('Erro ao gerar backup', 'error');
+            return;
+        }
+        const blob = xhr.response;
+        salvarArquivo(blob, nomeDoBackup(xhr));
+        setProgress('download', 100, `Backup concluído (${formatBytes(blob.size)})`, 'done');
+        showToast('Backup gerado com sucesso', 'success');
+    };
+
+    xhr.onerror = () => {
+        btn.disabled = false;
+        setProgress('download', 100, 'Falha de conexão ao baixar o backup', 'error');
+        showToast('Erro ao gerar backup', 'error');
+    };
+
+    xhr.send();
+}
+
+function handleRestore(e) {
+    const input = e.target;
+    const file = input.files[0];
+    if (!file) return;
+    input.value = '';  // permite reenviar o mesmo arquivo
+    if (!confirm('A restauração substituirá TODOS os dados atuais. Continuar?')) return;
+
+    const btn = document.getElementById('btnRestore');
+    btn.disabled = true;
+    setProgress('upload', 0, `Enviando ${file.name} (${formatBytes(file.size)})…`);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/backup/restaurar');
+
+    xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        setProgress('upload', (e.loaded / e.total) * 100,
+            `Enviando arquivo… ${formatBytes(e.loaded)} de ${formatBytes(e.total)}`);
+    };
+
+    // Upload terminou; o tempo restante é o servidor gravando os dados.
+    xhr.upload.onload = () => setProgress('upload', null, 'Restaurando dados no servidor…');
+
+    xhr.onload = () => {
+        btn.disabled = false;
+        if (xhr.status !== 200) {
+            let msg = 'Erro ao restaurar backup';
+            try {
+                const err = JSON.parse(xhr.responseText);
+                if (typeof err.detail === 'string') msg = err.detail;
+            } catch (erro) { /* resposta sem JSON */ }
+            setProgress('upload', 100, msg, 'error');
+            showToast(msg, 'error');
+            return;
+        }
+        setProgress('upload', 100, 'Restauração concluída — recarregando…', 'done');
+        showToast('Backup restaurado com sucesso', 'success');
+        setTimeout(() => location.reload(), 1500);
+    };
+
+    xhr.onerror = () => {
+        btn.disabled = false;
+        setProgress('upload', 100, 'Falha de conexão ao enviar o arquivo', 'error');
+        showToast('Erro ao restaurar backup', 'error');
+    };
+
+    xhr.send(formData);
+}
+</script>
+{% endblock %}
